@@ -19,29 +19,20 @@
 # ##### END GPL LICENSE BLOCK #####
 
 bl_info = {
-    "name": "Primitive Repeat",
+    "name": "quick dupe linked",
     "author": "Dealga McArdle",
-    "version": (0, 0, 2),
-    "blender": (2, 7, 4),
-    "location": "3dview, key combo",
-    "description": "Places items at N even/random intervals between 2 linked dups.",
-    "wiki_url": "",
-    "tracker_url": "",
-    "keywords": ("duplicate", "repeat", "random", "spread"),
-    "category": "Mesh"}
-
-import time
+    "version": (0, 1),
+    "blender": (2, 7, 6),
+    "category": "3D View"
+}
 
 import bpy
-import random
-from mathutils import Vector
+import time
+import mathutils
 
 
-Scene = bpy.types.Scene
-
-
-def obj_id(caller):
-    return str(hash(caller) ^ hash(time.monotonic()))
+def get_operator_id(caller):
+    return str(hash(caller))
 
 
 def remove_obj(obj):
@@ -52,159 +43,125 @@ def remove_obj(obj):
     objs.remove(obj)
 
 
-def remove_excess_linked(idx, current_id):
+def remove_excess_linked(idx, operator_id):
     for o in bpy.data.objects:
-        if not o.get('SKETCHPAD_ID'):
+        if not (o.get('flux_operator_id') == operator_id):
             continue
-        if not (o['SKETCHPAD_ID'] == current_id):
-            continue
-        if o['SKETCHPAD_IDX'] > idx:
+        if o['flux_dupe_index'] > idx:
             remove_obj(o)
 
 
-def get_objs_and_meshnames():
-    sel_objs = bpy.context.selected_objects
-    objs = [o for o in sel_objs if o.type == 'MESH']
-    mesh_names = [o.data.name for o in objs]
-    return objs, mesh_names
+def make_or_update_dupe(idx, amt, props, MT):
+    scene = bpy.context.scene
+    objs = bpy.data.objects
+    meshes = bpy.data.meshes
+
+    obj = None
+    for o in objs:
+        if o.get('flux_operator_id') == props.operator_id:
+            if o['flux_dupe_index'] == idx:
+                obj = o
+                break
+    if not obj:
+        obj = objs.new(props.linked_mesh_name, meshes.get(props.linked_mesh_name))
+        obj['flux_dupe_index'] = idx
+        obj['flux_operator_id'] = props.operator_id
+        scene.objects.link(obj)
+
+    if props.interpolate_matrices:
+        A_MAT, B_MAT = props.a_mat, props.b_mat
+        obj.matrix_world = A_MAT.lerp(B_MAT, amt)
+    else:
+        A, B = props.loc1, props.loc2
+        obj.location = A.lerp(B, amt)
+
+    obj.parent = MT
 
 
-class ModalPrimitiveRepeat(bpy.types.Operator):
+def main(props, context):
+    scene = context.scene
 
-    bl_idname = "view3d.linked_primitive_repeat"
-    bl_label = "SP style primitive repeat"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
+    def make_or_reference_associated_empty():
+        objects = bpy.data.objects
+        MT_NAME = "FLUX_" + props.operator_id
+        MT = objects.get(MT_NAME)
+        if not MT:
+            MT = objects.new(MT_NAME, None)
+            scene.objects.link(MT)
+        return MT
+
+    MT = make_or_reference_associated_empty()
+
+    print(props.linked_mesh_name)
+
+    if props.num_repeats <= 0:
+        remove_excess_linked(0, props.operator_id)
+        # context.scene.objects.unlink(MT)
+        return
+
+    divcount = props.num_repeats + 1
+    mode = props.selected_spread_mode
+
+    if mode == 'linear':
+        segment = (1.0 / divcount)
+        f = [i * segment for i in range(1, divcount)]
+    elif mode == 'deviate':
+        ...
+    elif mode == 'random':
+        ...
+    else:
+        return
+
+    for idx, amt in enumerate(f):
+        make_or_update_dupe(idx, amt, props, MT)
+
+    # any objects found with greater index can be removed
+    remove_excess_linked(idx, props.operator_id)
+
+
+class FluxOperator(bpy.types.Operator):
+    bl_idname = "flux.my_operator"
+    bl_label = "Simple flux"
     bl_options = {'REGISTER', 'UNDO'}
 
-    SP_NUM_ITEMS = bpy.props.IntProperty(default=3, min=3)
-    SP_OPERATOR_RUNNING = bpy.props.BoolProperty(default=False)
-    SP_OBJ_IDENTIFIER = bpy.props.StringProperty()
-    SP_RANDOM_SEED = bpy.props.IntProperty()
+    linked_mesh_name = bpy.props.StringProperty()
+    num_repeats = bpy.props.IntProperty(min=0, default=1)
+    operator_id = bpy.props.StringProperty()
 
-    def add_duplicate_linked(self, idx, named_object, named_mesh, loc):
-        meshes = bpy.data.meshes
-        scn = bpy.context.scene
-        objects = bpy.data.objects
-        me = meshes.get(named_mesh)
-        ID = self.SP_OBJ_IDENTIFIER
+    spread_modes = enumerate(['linear', 'deviate', 'random'])
+    selected_spread_mode = bpy.props.EnumProperty(
+        items=[(mode, mode, "", idx) for idx, mode in spread_modes],
+        description="offers....",
+        default="linear"
+    )
 
-        # ADD OR REUSE and update location..
-        def find(ID, idx):
-            for obj in objects:
-                if obj.type == 'MESH':
-                    rval = obj.get('SKETCHPAD_ID')
-                    if rval == ID:
-                        if obj.get('SKETCHPAD_IDX') == idx:
-                            return obj
-        result = find(ID, idx)
-        if result:
-            obj = result
-        else:
-            obj = objects.new(named_object, me)
-            scn.objects.link(obj)
-            obj['SKETCHPAD_ID'] = ID
-            obj['SKETCHPAD_IDX'] = idx
-        obj.location = loc
+    interpolate_matrices = bpy.props.BoolProperty()
 
-    def add_between_duplicate_linked(self, num_items=3, rand=False):
-        if num_items < 3:
-            return
+    @classmethod
+    def poll(cls, context):
+        active = context.active_object
+        selected = context.selected_objects
+        if active and selected and (len(selected) == 2):
+            return selected[0].data == selected[1].data
 
-        num_items -= 2
-        rate = 1 / (num_items + 1)
+    def execute(self, context):
+        self.linked_mesh_name = context.active_object.data.name
+        self.loc1, self.loc2 = [o.location for o in context.selected_objects]
+        self.operator_id = get_operator_id(self)
+        self.a_mat = context.selected_objects[0].matrix_world
+        self.b_mat = context.selected_objects[1].matrix_world
 
-        # two objects, both reference the same mesh?
-        objs, mesh_names = get_objs_and_meshnames()
-        if not (len(mesh_names) == 2) or not (len(set(mesh_names)) == 1):
-            return
-
-        loc1, loc2 = objs[0].location, objs[1].location
-        named_mesh = mesh_names[0]
-
-        obj_names = [o.name for o in objs]
-        pick_name = sorted(obj_names)[0]
-
-        if rand >= 1:
-            random.seed(rand)
-            rnd_rates = [random.random() for r in range(num_items)]
-            for i, r in enumerate(rnd_rates, 1):
-                loc = loc1.lerp(loc2, r)
-                self.add_duplicate_linked(i, pick_name, named_mesh, loc)
-
-        else:
-            for i in range(1, num_items + 1):
-                loc = loc1.lerp(loc2, i * rate)
-                self.add_duplicate_linked(i, pick_name, named_mesh, loc)
-
-    def handle_user_interaction(self, context, event):
-        scn = context.scene
-        n = event.type
-        handled = False
-
-        if not event.ctrl:
-            if n in {'LEFT_BRACKET', 'RIGHT_BRACKET'}:
-                self.SP_NUM_ITEMS += (1 if (n == 'RIGHT_BRACKET') else -1)
-                handled = True
-        else:
-            if n in {'DOWN_ARROW', 'UP_ARROW'}:
-                self.SP_RANDOM_SEED += (1 if (n == 'UP_ARROW') else -1)
-                self.SP_RANDOM_SEED = max(self.SP_RANDOM_SEED, 0)
-                handled = True
-
-        if handled:
-            current_id = self.SP_OBJ_IDENTIFIER
-            num_items = self.SP_NUM_ITEMS
-            seed = self.SP_RANDOM_SEED
-            self.add_between_duplicate_linked(num_items=num_items, rand=seed)
-            remove_excess_linked(num_items - 2, current_id)
-
-        return handled
-
-    def modal(self, context, event):
-        # context.area.tag_redraw()
-        scn = context.scene
-        n = event.type
-
-        if n in {'RIGHTMOUSE', 'ESC'}:
-            obj = context.active_object
-            self.SP_OPERATOR_RUNNING = False
-            remove_excess_linked(0, self.SP_OBJ_IDENTIFIER)
-            return {'CANCELLED'}
-
-        if n in {'RET'} and event.ctrl:
-            self.SP_OPERATOR_RUNNING = False
-            return {'FINISHED'}
-
-        defined_keys = {'LEFT_BRACKET', 'RIGHT_BRACKET', 'DOWN_ARROW', 'UP_ARROW'}
-        if (n in defined_keys) and (event.value == 'PRESS'):
-            if self.handle_user_interaction(context, event):
-                return {'RUNNING_MODAL'}
-
-        return {'PASS_THROUGH'}
-
-    def invoke(self, context, event):
-        if context.area.type == 'VIEW_3D':
-            scn = context.scene
-            self.SP_OPERATOR_RUNNING = True
-            self.SP_NUM_ITEMS = 3
-            self.SP_OBJ_IDENTIFIER = obj_id(self)
-            self.SP_RANDOM_SEED = 0
-            self.add_between_duplicate_linked(
-                num_items=self.SP_NUM_ITEMS,
-                rand=self.SP_RANDOM_SEED)
-
-            context.window_manager.modal_handler_add(self)
-            print('start')
-            return {'RUNNING_MODAL'}
-        else:
-            self.report({'WARNING'}, "View3D not found, cannot run operator")
-            return {'CANCELLED'}
+        main(self, context)
+        return {'FINISHED'}
 
 
 def register():
-    bpy.utils.register_class(ModalPrimitiveRepeat)
+    bpy.utils.register_class(FluxOperator)
 
 
 def unregister():
-    bpy.utils.unregister_class(ModalPrimitiveRepeat)
+    bpy.utils.unregister_class(FluxOperator)
+
+
+if __name__ == "__main__":
+    register()
