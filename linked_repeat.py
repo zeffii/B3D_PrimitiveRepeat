@@ -18,6 +18,7 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
+
 bl_info = {
     "name": "quick dupe linked",
     "author": "Dealga McArdle",
@@ -26,8 +27,10 @@ bl_info = {
     "category": "3D View"
 }
 
-import bpy
 import time
+import random
+
+import bpy
 import mathutils
 
 
@@ -106,9 +109,14 @@ def main(props, context):
         segment = (1.0 / divcount)
         f = [i * segment for i in range(1, divcount)]
     elif mode == 'deviate':
-        ...
+        segment = (1.0 / divcount)
+        random.seed(props.seed)
+        a = props.amp
+        f = [((i * segment) + ((random.random() - 0.5) * (a / 20))) for i in range(1, divcount)]
     elif mode == 'random':
-        ...
+        random.seed(props.seed)
+        f = [random.random() for r in range(1, divcount)]
+
     else:
         return
 
@@ -134,6 +142,9 @@ class FluxOperator(bpy.types.Operator):
         description="offers....",
         default="linear"
     )
+
+    seed = bpy.props.IntProperty()
+    amp = bpy.props.FloatProperty()
 
     interpolate_matrices = bpy.props.BoolProperty()
 
